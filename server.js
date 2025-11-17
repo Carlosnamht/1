@@ -1,7 +1,6 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
-// import dotenv from 'dotenv'; dotenv.config(); 
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -11,11 +10,10 @@ app.use(express.json());
 
 const HF_API_KEY = process.env.HF_API_KEY;
 
-// 1. SELECCIONAMOS EL MODELO (Zephyr es excelente y gratuito)
-const MODEL_ID = "HuggingFaceH4/zephyr-7b-beta";
+// 1. CAMBIO DE MODELO: Usamos 'gemma-1.1-7b-it' porque Zephyr no está en el router nuevo.
+const MODEL_ID = "google/gemma-1.1-7b-it";
 
-// 2. USAMOS LA NUEVA URL "ROUTER"
-// La estructura correcta es: https://router.huggingface.co/hf-inference/models/{MODEL_ID}
+// 2. URL DEL ROUTER: Esta es la URL obligatoria ahora.
 const HF_INFERENCE_URL = `https://router.huggingface.co/hf-inference/models/${MODEL_ID}`;
 
 app.post('/api/generate', async (req, res) => {
@@ -23,37 +21,35 @@ app.post('/api/generate', async (req, res) => {
 
     if (!HF_API_KEY) return res.status(500).json({ message: 'Falta API Key.' });
 
-    // 3. FORMATEO DEL PROMPT (Estilo Chat para Zephyr/Mistral)
+    // 3. PROMPT ADAPTADO: Gemma usa un formato simple
     let prompt = '';
     
-    // Función auxiliar para limpiar strings
-    const cleanText = (txt) => txt ? txt.replace(/"/g, '').trim() : '';
+    // Función para limpiar comillas extra que a veces genera la IA
+    const cleanText = (txt) => txt ? txt.replace(/^"|"$/g, '').trim() : '';
 
+    // Construimos el prompt según la tarea
     if (task === 'translate_chapter' || task === 'translate_title') {
         const textToTranslate = task === 'translate_title' ? payload.title : payload.content;
-        prompt = `<|system|>
-You are a professional translator specialized in literary translation.
-</s>
-<|user|>
-Translate the following text to ${payload.targetLanguage}.
-Style: ${payload.targetCulture}.
-Genre: ${payload.genre}.
-Tone: Maintain original tone.
-
-Text to translate:
-"${textToTranslate}"
-</s>
-<|assistant|>`;
+        prompt = `Translate this text to ${payload.targetLanguage}.
+Style: ${payload.targetCulture}. Genre: ${payload.genre}.
+Original Text: "${textToTranslate}"
+Translation:`;
     } else if (task === 'generate_anexo') {
-        prompt = `<|system|>You are a creative novelist.</s><|user|>Create a character description for a ${payload.novelGenre} novel. Type: ${payload.type}, Name: "${payload.name}". Include physical appearance and motivations.</s><|assistant|>`;
+        prompt = `Write a character description for a ${payload.novelGenre} novel.
+Name: "${payload.name}". Type: ${payload.type}.
+Include physical appearance and motivations.
+Description:`;
     } else if (task === 'suggest_title') {
-        prompt = `<|system|>You are an editor.</s><|user|>Suggest 1 short, creative chapter title for a ${payload.novelGenre} novel titled "${payload.novelTitle}". Context: "${payload.previousChapterContent}". Output ONLY the title.</s><|assistant|>`;
+        prompt = `Suggest 1 creative chapter title for a ${payload.novelGenre} novel named "${payload.novelTitle}".
+Context: "${payload.previousChapterContent}".
+Only output the title.
+Title:`;
     } else {
         prompt = JSON.stringify(payload);
     }
 
     try {
-        console.log("Enviando petición a:", HF_INFERENCE_URL);
+        console.log(`Conectando a: ${HF_INFERENCE_URL}`);
 
         const response = await fetch(HF_INFERENCE_URL, {
             method: 'POST',
@@ -65,8 +61,8 @@ Text to translate:
                 inputs: prompt,
                 parameters: {
                     max_new_tokens: 500,
-                    return_full_text: false, // Importante: para no repetir el prompt
-                    temperature: 0.7,
+                    return_full_text: false, // Para que no repita tu pregunta
+                    temperature: 0.7
                 }
             }),
         });
@@ -75,17 +71,22 @@ Text to translate:
             const errorText = await response.text();
             console.error(`Error HF (${response.status}):`, errorText);
             
+            // Manejo de errores comunes
             if (response.status === 503) {
-                return res.status(503).json({ message: 'El modelo se está iniciando (Cold Boot). Espera 20 segundos e intenta de nuevo.' });
+                return res.status(503).json({ message: 'Modelo cargando (Cold Boot). Intenta en 30 segundos.' });
             }
-            throw new Error(`Error de Hugging Face: ${response.status} ${errorText}`);
+            if (response.status === 404) {
+                return res.status(404).json({ message: `El modelo ${MODEL_ID} no está disponible en el Router actual.` });
+            }
+            
+            throw new Error(`Error Hugging Face: ${response.status} - ${errorText}`);
         }
 
         const result = await response.json();
-        console.log("Respuesta bruta:", JSON.stringify(result).substring(0, 200) + "...");
-
-        // La respuesta suele ser un array [{ generated_text: "..." }]
+        
+        // La estructura de respuesta es un array
         const generatedText = (result && result[0]) ? result[0].generated_text : '';
+        console.log("Texto generado:", generatedText.substring(0, 50) + "...");
 
         let formattedResponse = {};
 
@@ -94,7 +95,7 @@ Text to translate:
         } else if (task === 'translate_title') {
              formattedResponse = { translatedTitle: cleanText(generatedText) };
         } else if (task === 'generate_anexo') {
-            formattedResponse = { appearance: 'Ver descripción abajo', motivation: generatedText.trim() };
+            formattedResponse = { appearance: 'Ver texto', motivation: generatedText.trim() };
         } else if (task === 'suggest_title') {
             formattedResponse = { suggestedTitle: cleanText(generatedText) };
         } else {
