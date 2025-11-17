@@ -1,3 +1,4 @@
+// Contenido para tu archivo server.js
 import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
@@ -8,108 +9,103 @@ const port = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
-const HF_API_KEY = process.env.HF_API_KEY;
+// 1. Lee la nueva API Key de Groq desde las variables de entorno
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-// 1. URL DEL MODELO NLLB
-const MODEL_ID = "facebook/nllb-200-distilled-600M";
-const HF_INFERENCE_URL = `https://router.huggingface.co/hf-inference/models/${MODEL_ID}`;
-
-// 2. MAPA DE IDIOMAS (NLLB usa códigos FLORES-200)
-// Puedes añadir más aquí: https://github.com/facebookresearch/flores/blob/main/flores200/README.md
-const LANGUAGE_MAP = {
-    'Spanish': 'spa_Latn',
-    'English': 'eng_Latn',
-    'French': 'fra_Latn',
-    'German': 'deu_Latn',
-    'Italian': 'ita_Latn',
-    'Portuguese': 'por_Latn',
-    'Japanese': 'jpn_Jpan',
-    'Chinese': 'zho_Hans',
-    // Valor por defecto si no encuentra el idioma
-    'default': 'eng_Latn' 
-};
-
-const getFloresCode = (langName) => {
-    // Intenta buscar exacto, o busca si el string incluye el nombre (ej: "Spanish (Spain)")
-    const key = Object.keys(LANGUAGE_MAP).find(k => langName && langName.includes(k));
-    return LANGUAGE_MAP[key] || LANGUAGE_MAP['default'];
-};
+// 2. Define el modelo de Groq a utilizar (LLaMA 3 es excelente y rápido)
+const MODEL_ID = "llama3-8b-8192";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 app.post('/api/generate', async (req, res) => {
     const { task, payload } = req.body;
 
-    if (!HF_API_KEY) return res.status(500).json({ message: 'Falta API Key.' });
+    if (!GROQ_API_KEY) {
+        return res.status(500).json({ message: 'La API Key de Groq no está configurada en el servidor.' });
+    }
 
-    // --- LÓGICA ESPECÍFICA PARA NLLB ---
-    
-    if (task === 'translate_chapter' || task === 'translate_title') {
-        const textToTranslate = task === 'translate_title' ? payload.title : payload.content;
-        
-        // Detectamos idioma origen (asumimos inglés si no viene definido, o puedes pasarlo en el payload)
-        // Si tu app no envía sourceLanguage, NLLB intentará adivinarlo, pero es mejor especificarlo.
-        const srcLang = payload.sourceLanguage ? getFloresCode(payload.sourceLanguage) : 'eng_Latn'; 
-        const tgtLang = getFloresCode(payload.targetLanguage);
+    let systemPrompt = "You are a helpful assistant for a novelist.";
+    let userPrompt = '';
 
-        try {
-            console.log(`Traduciendo de ${srcLang} a ${tgtLang} usando NLLB...`);
+    const cleanText = (txt) => txt ? txt.replace(/^"|"$/g, '').trim() : '';
 
-            const response = await fetch(HF_INFERENCE_URL, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${HF_API_KEY}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    inputs: textToTranslate,
-                    parameters: {
-                        // Estos parámetros son OBLIGATORIOS para NLLB
-                        src_lang: srcLang,
-                        tgt_lang: tgtLang
-                    }
-                }),
-            });
+    // 3. Construye los prompts para cada tarea
+    switch (task) {
+        case 'translate_chapter':
+        case 'translate_title':
+            const textToTranslate = task === 'translate_title' ? payload.title : payload.content;
+            systemPrompt = `You are a professional translator. Translate the user's text to the target language, maintaining the original tone and genre. Only output the translated text.`;
+            userPrompt = `Translate the following text to ${payload.targetLanguage}.\nGenre: ${payload.genre}.\nText: "${textToTranslate}"`;
+            break;
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                if (response.status === 503) return res.status(503).json({ message: 'Modelo cargando (Cold Boot). Reintenta en 20s.' });
-                throw new Error(`HF Error ${response.status}: ${errorText}`);
-            }
+        case 'generate_anexo':
+            systemPrompt = `You are a creative writer. Describe a character or location for a novel based on the user's request. Provide a description for 'appearance' and 'motivation' in a JSON object format like {"appearance": "...", "motivation": "..."}.`;
+            userPrompt = `Novel Genre: ${payload.novelGenre}.\nName: "${payload.name}".\nType: ${payload.type}.`;
+            break;
 
-            const result = await response.json();
-            
-            // NOTA: NLLB devuelve un formato diferente a Mistral/Gemma
-            // Suele ser: [{ translation_text: "..." }]
-            const translatedText = (result && result[0]) ? 
-                                   (result[0].translation_text || result[0].generated_text) : '';
+        case 'suggest_title':
+            systemPrompt = `You are an expert book editor. Suggest one single, creative, and fitting chapter title based on the context provided. Only output the title itself, without any quotation marks or extra text.`;
+            userPrompt = `Novel Title: "${payload.novelTitle}".\nNovel Genre: ${payload.novelGenre}.\nPrevious Chapter Content: "${payload.previousChapterContent}"`;
+            break;
 
-            const formattedResponse = { 
-                translatedTitle: task === 'translate_title' ? translatedText : `[TRAD] ${payload.title}`, 
-                translatedContent: translatedText 
-            };
+        default:
+            return res.status(400).json({ message: `Tarea desconocida: ${task}` });
+    }
 
-            return res.status(200).json(formattedResponse);
-
-        } catch (error) {
-            console.error('Translation Error:', error);
-            return res.status(500).json({ message: error.message });
-        }
-    } 
-    
-    // --- AQUÍ MANTENEMOS LA LÓGICA PARA LAS OTRAS TAREAS QUE NO SON TRADUCCIÓN ---
-    // (Para generar anexos o títulos, NLLB NO sirve, necesitas un LLM como Gemma o Zephyr)
-    else {
-        return res.status(400).json({ 
-            message: 'Este endpoint ahora está configurado solo para traducción con NLLB. Para generación de texto usa otro modelo.' 
+    try {
+        const response = await fetch(GROQ_API_URL, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                model: MODEL_ID,
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: userPrompt }
+                ],
+                ...(task === 'generate_anexo' && { response_format: { type: "json_object" } })
+            }),
         });
-        
-        /* SI QUIERES MANTENER TODO EN UN SOLO ARCHIVO:
-           Tendrías que hacer un "if" arriba del todo:
-           if (task.includes('translate')) -> USAR URL DE NLLB
-           else -> USAR URL DE GEMMA/MISTRAL
-        */
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Error en la API de Groq: ${response.status} - ${errorText}`);
+        }
+
+        const result = await response.json();
+        const generatedText = result.choices[0]?.message?.content || '';
+
+        let formattedResponse = {};
+
+        // 4. Formatea la respuesta para el frontend
+        switch (task) {
+            case 'translate_chapter':
+                formattedResponse = { translatedContent: generatedText.trim() };
+                break;
+            case 'translate_title':
+                formattedResponse = { translatedTitle: cleanText(generatedText) };
+                break;
+            case 'generate_anexo':
+                try {
+                    formattedResponse = JSON.parse(generatedText);
+                } catch (e) {
+                    formattedResponse = { appearance: generatedText, motivation: "No se pudo generar una motivación separada." };
+                }
+                break;
+            case 'suggest_title':
+                formattedResponse = { suggestedTitle: cleanText(generatedText) };
+                break;
+        }
+
+        return res.status(200).json(formattedResponse);
+
+    } catch (error) {
+        console.error('Error del Servidor:', error.message);
+        return res.status(500).json({ message: error.message });
     }
 });
 
 app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
+    console.log(`Servidor para Groq corriendo en el puerto ${port}`);
 });
