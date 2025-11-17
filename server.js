@@ -13,9 +13,13 @@ app.use(express.json());
 // Tu clave de API de Hugging Face (la leeremos de las variables de entorno de Render)
 const HF_API_KEY = process.env.HF_API_KEY;
 
-// La URL de la API de Inferencia de Hugging Face
-// Usaremos un modelo de lenguaje versátil. Puedes cambiarlo si lo necesitas.
-const MODEL_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2";
+// --- CAMBIOS AQUÍ ---
+// 1. La URL de la API de Hugging Face ha sido actualizada según el mensaje de error.
+const HF_INFERENCE_URL = "https://router.huggingface.co/hf-inference";
+// 2. Ahora pasamos el nombre del modelo como parte de la petición.
+const MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2";
+// --- FIN DE LOS CAMBIOS ---
+
 
 // Ruta principal de la API que tu frontend llamará
 app.post('/api/generate', async (req, res) => {
@@ -28,36 +32,37 @@ app.post('/api/generate', async (req, res) => {
         return res.status(400).json({ message: 'Request must include a "task" and "payload".' });
     }
 
-    // Aquí construyes el prompt para la IA basado en la tarea que pide el frontend.
-    // Esto es muy importante y necesitarás ajustarlo para obtener los mejores resultados.
     let prompt = '';
-    if (task === 'translate_chapter') {
-        prompt = `Translate the following text to ${payload.targetLanguage} in a ${payload.targetCulture} style. Keep the original tone and genre (${payload.genre}). Text to translate: "${payload.content}"`;
+    if (task === 'translate_chapter' || task === 'translate_title') {
+        const textToTranslate = task === 'translate_title' ? payload.title : payload.content;
+        prompt = `Translate the following text to ${payload.targetLanguage} in a ${payload.targetCulture} style. Keep the original tone and genre (${payload.genre}). Text to translate: "${textToTranslate}"`;
     } else if (task === 'generate_anexo') {
         prompt = `For a ${payload.novelGenre} novel, create a detailed description for a ${payload.type} named "${payload.name}". Describe their physical appearance and their motivations within the story.`;
     } else if (task === 'suggest_title') {
         prompt = `Suggest a creative and fitting chapter title for a ${payload.novelGenre} novel titled "${payload.novelTitle}". The previous chapter ended with this content: "${payload.previousChapterContent}"`;
     } else {
-        // Un caso genérico si se añade una nueva tarea
         prompt = JSON.stringify(payload);
     }
     
     try {
-        const response = await fetch(MODEL_URL, {
+        // --- CAMBIOS AQUÍ ---
+        // 3. La llamada ahora va a la nueva URL y el modelo se especifica en el "body".
+        const response = await fetch(HF_INFERENCE_URL, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${HF_API_KEY}`,
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({ 
+                model: MODEL_ID, // El modelo ahora se pasa aquí
                 inputs: prompt,
-                // Parámetros para controlar la respuesta de la IA
                 parameters: {
                     max_new_tokens: 500,
                     return_full_text: false,
                 }
             }),
         });
+        // --- FIN DE LOS CAMBIOS ---
 
         if (!response.ok) {
             const errorText = await response.text();
@@ -67,15 +72,16 @@ app.post('/api/generate', async (req, res) => {
         const result = await response.json();
         const generatedText = result[0]?.generated_text || '';
 
-        // Ahora, formatea la respuesta para que coincida con lo que el frontend espera.
         let formattedResponse = {};
         if (task === 'translate_chapter') {
-            formattedResponse = { translatedTitle: `[TRAD] ${payload.title}`, translatedContent: generatedText };
+            // El título también necesita ser traducido. Hacemos una suposición simple por ahora.
+            formattedResponse = { translatedTitle: `[TRAD] ${payload.title}`, translatedContent: generatedText.trim() };
+        } else if (task === 'translate_title') {
+             formattedResponse = { translatedTitle: generatedText.trim().replace(/"/g, '') };
         } else if (task === 'generate_anexo') {
-            // Esto es una simplificación. Podrías pedir a la IA que formatee la salida como JSON.
-            formattedResponse = { appearance: 'Apariencia generada por IA...', motivation: generatedText };
+            formattedResponse = { appearance: 'Apariencia generada por IA...', motivation: generatedText.trim() };
         } else if (task === 'suggest_title') {
-            formattedResponse = { suggestedTitle: generatedText.replace(/"/g, '') };
+            formattedResponse = { suggestedTitle: generatedText.trim().replace(/"/g, '') };
         }
 
         res.status(200).json(formattedResponse);
